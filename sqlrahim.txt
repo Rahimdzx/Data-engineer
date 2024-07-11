@@ -1,0 +1,95 @@
+Правки и доработки для решения поставленного задания
+1-Объявим переменные для диапазона дат и названий групп товаров.
+2-Создадим временную таблицу для хранения названий групп товаров.
+3-Добавим парсинг строки названий групп товаров и вставку их во временную таблицу.
+4-Расширим запрос для вычисления дополнительных метрик, таких как средняя закупочная цена, маржа и наценка.
+5-Реализуем запрос для расчета доли продаж с НДС по магазинам и группам товаров.
+
+
+
+script sql : 
+-- Объявление переменных для диапазона дат и названий групп товаров
+DECLARE @date_from DATE = '2017-06-01';  -- Дата начала для данных о продажах
+DECLARE @date_to DATE = '2017-06-30';    -- Дата окончания для данных о продажах
+DECLARE @good_group_name NVARCHAR(100) = N'Биологически активные добавки,Косметические средства';  -- Названия групп товаров для фильтрации
+
+-- Временная таблица для хранения названий групп товаров с кириллической сортировкой
+DECLARE @GroupNames TABLE (GroupName NVARCHAR(100) COLLATE Cyrillic_General_CI_AS)
+
+-- Парсинг и вставка названий групп товаров во временную таблицу
+DECLARE @Pos INT = 1
+DECLARE @NextPos INT
+DECLARE @GroupName NVARCHAR(100)
+
+WHILE @Pos <= LEN(@good_group_name)
+BEGIN
+    SET @NextPos = CHARINDEX(',', @good_group_name, @Pos)
+    IF @NextPos = 0
+        SET @NextPos = LEN(@good_group_name) + 1
+
+    -- Извлечение подстроки с названием группы товаров
+    SET @GroupName = LTRIM(RTRIM(SUBSTRING(@good_group_name, @Pos, @NextPos - @Pos)))
+    IF @GroupName <> ''
+        INSERT INTO @GroupNames (GroupName) VALUES (@GroupName)
+
+    SET @Pos = @NextPos + 1
+END
+
+-- Запрос для вычисления продаж, количества, маржи и наценки для нескольких групп товаров
+SELECT 
+    SUM(FT.sale_grs) AS total_sales_rub,  -- Общий доход от продаж в рублях
+    DM.group_name,                        -- Название группы товаров
+    CONVERT(DATE, CONVERT(VARCHAR, FT.date_id)) AS transaction_date,  -- Дата транзакции
+    SUM(FT.quantity) AS total_sales_quantity,  -- Общее количество проданных товаров
+    AVG(FT.cost_net) AS avg_purchase_price,  -- Средняя закупочная цена
+    SUM(FT.sale_net - FT.cost_net) AS margin_rub,  -- Маржа в рублях
+    CASE WHEN SUM(FT.cost_net) <> 0 
+         THEN SUM((FT.sale_net - FT.cost_net) / NULLIF(FT.cost_net, 0)) * 100
+         ELSE NULL 
+    END AS markup_percent  -- Процент наценки, с учетом деления на ноль
+FROM 
+    TestTaskDB.dbo.fct_cheque AS FT  -- Исходная таблица для транзакций по продажам
+LEFT JOIN 
+    TestTaskDB.dbo.dim_goods AS DM ON FT.good_id = DM.good_id  -- Присоединение к таблице с информацией о товарах
+WHERE 
+    CONVERT(DATE, CONVERT(VARCHAR, FT.date_id)) >= @date_from  -- Фильтр по дате начала транзакций
+    AND CONVERT(DATE, CONVERT(VARCHAR, FT.date_id)) <= @date_to  -- Фильтр по дате окончания транзакций
+    AND EXISTS (
+        -- Подзапрос для проверки наличия названия группы товаров в @GroupNames с кириллической сортировкой
+        SELECT 1
+        FROM @GroupNames gn
+        WHERE gn.GroupName = DM.group_name COLLATE Cyrillic_General_CI_AS
+    )
+GROUP BY 
+    DM.group_name, CONVERT(DATE, CONVERT(VARCHAR, FT.date_id));  -- Группировка результатов по названию группы товаров и дате транзакции
+
+-- Объявление переменных для расчета доли продаж с НДС по магазинам
+DECLARE @vat_date_from DATE = '2017-06-01';  -- Дата начала для анализа продаж с НДС
+DECLARE @vat_date_to DATE = '2017-06-30';    -- Дата окончания для анализа продаж с НДС
+
+-- Основной запрос для расчета доли продаж с НДС по магазинам и группам товаров
+SELECT 
+    CONVERT(DATE, CONVERT(VARCHAR, FT.date_id)) AS transaction_date,  -- Дата транзакции
+    DS.store_name,  -- Название магазина из таблицы dim_stores
+    DM.group_name,  -- Название группы товаров
+    SUM(FT.sale_grs) AS total_sales_with_vat,  -- Общая сумма продаж с НДС
+    SUM(FT.sale_grs - FT.sale_net) AS vat_amount,  -- Сумма НДС
+    CAST(SUM(FT.sale_grs - FT.sale_net) AS FLOAT) / NULLIF(SUM(FT.sale_grs), 0) * 100 AS vat_sales_ratio  -- Доля продаж с НДС
+FROM 
+    TestTaskDB.dbo.fct_cheque AS FT
+LEFT JOIN 
+    TestTaskDB.dbo.dim_goods AS DM ON FT.good_id = DM.good_id
+LEFT JOIN 
+    TestTaskDB.dbo.dim_stores AS DS ON FT.store_id = DS.store_id  -- Присоединение к таблице dim_stores для получения названия магазина
+WHERE 
+    CONVERT(DATE, CONVERT(VARCHAR, FT.date_id)) >= @vat_date_from
+    AND CONVERT(DATE, CONVERT(VARCHAR, FT.date_id)) <= @vat_date_to
+    AND DM.group_name COLLATE Cyrillic_General_CI_AS IN (SELECT GroupName FROM @GroupNames)  -- Фильтрация по нескольким группам товаров с кириллической сортировкой
+GROUP BY 
+    CONVERT(DATE, CONVERT(VARCHAR, FT.date_id)),
+    DS.store_name,
+    DM.group_name
+ORDER BY 
+    vat_sales_ratio DESC;  -- Сортировка по убыванию доли продаж с НДС
+==============================================================================================================
+
